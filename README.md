@@ -476,6 +476,6 @@ func answer(ctx context.Context, prompt []*schema.Message, vendor string) (*sche
 go test ./...
 ```
 
-## 代码来源
+## 参考源码
 
-https://github.com/teoclub/seedpod
+https://github.com/smhanov/llmhub
