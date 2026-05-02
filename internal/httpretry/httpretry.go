@@ -16,10 +16,6 @@ const (
 	defaultMaxDelay   = 8 * time.Second
 )
 
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
-
 // Config controls retry behavior for rate-limited HTTP requests.
 type Config struct {
 	MaxRetries int
@@ -37,7 +33,19 @@ func DefaultConfig() Config {
 }
 
 // Do issues an HTTP request and retries with backoff when a 429 response is received.
-func Do(ctx context.Context, client *http.Client, makeReq func() (*http.Request, error), cfg Config) (*http.Response, error) {
+func Do(
+	ctx context.Context,
+	client *http.Client,
+	makeReq func() (*http.Request, error),
+	cfg Config,
+) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 0
 	}
@@ -47,23 +55,32 @@ func Do(ctx context.Context, client *http.Client, makeReq func() (*http.Request,
 	if cfg.MaxDelay <= 0 {
 		cfg.MaxDelay = defaultMaxDelay
 	}
+
 	for attempt := 0; ; attempt++ {
 		req, err := makeReq()
 		if err != nil {
 			return nil, err
 		}
+
+		req = req.WithContext(ctx)
+
 		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
+
 		if resp.StatusCode != http.StatusTooManyRequests {
 			return resp, nil
 		}
+
 		if attempt >= cfg.MaxRetries {
 			return resp, nil
 		}
-		drainAndClose(resp)
+
 		delay := backoffDelay(resp, cfg, attempt)
+
+		drainAndClose(resp)
+
 		if !sleepWithContext(ctx, delay) {
 			return nil, ctx.Err()
 		}
@@ -76,12 +93,17 @@ func backoffDelay(resp *http.Response, cfg Config, attempt int) time.Duration {
 			return capDelay(retryAfter, cfg.MaxDelay)
 		}
 	}
+
 	if attempt < 0 {
 		attempt = 0
 	}
+
 	backoff := cfg.BaseDelay * time.Duration(1<<attempt)
 	backoff = capDelay(backoff, cfg.MaxDelay)
+
+	// Jitter range: 0.5x ~ 1.5x
 	jitter := 0.5 + rand.Float64()
+
 	return time.Duration(float64(backoff) * jitter)
 }
 
@@ -100,12 +122,14 @@ func parseRetryAfter(value string) (time.Duration, bool) {
 	if value == "" {
 		return 0, false
 	}
+
 	if seconds, err := strconv.Atoi(value); err == nil {
 		if seconds <= 0 {
 			return 0, false
 		}
 		return time.Duration(seconds) * time.Second, true
 	}
+
 	if parsed, err := http.ParseTime(value); err == nil {
 		delay := time.Until(parsed)
 		if delay <= 0 {
@@ -113,6 +137,7 @@ func parseRetryAfter(value string) (time.Duration, bool) {
 		}
 		return delay, true
 	}
+
 	return 0, false
 }
 
@@ -120,8 +145,10 @@ func sleepWithContext(ctx context.Context, delay time.Duration) bool {
 	if delay <= 0 {
 		return true
 	}
+
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return false
@@ -134,6 +161,7 @@ func drainAndClose(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
+
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 }
